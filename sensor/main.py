@@ -200,7 +200,9 @@ def take_measurement(prod):
                 pass
             else:
                 measurements.append(measurement)
-        
+        else:
+            measurements.append(measurement)
+            
         # Pause between measurements
         time.sleep(1)
     

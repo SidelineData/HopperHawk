@@ -1,6 +1,6 @@
 # ========== IMPORTS ========== #
 import network, machine, json, utime, time
-import battery
+import battery, sensor
 import uasyncio as asyncio
 from machine import Pin, ADC
 from microdot_asyncio import Microdot
@@ -50,7 +50,7 @@ api = Microdot()
 @api.route('/status')
 async def api_status(request):
     try:
-        return json.dumps({'alive':True,'pellet_level':(str(calc_remaining())+'%'),'battery_level':(str(battery.get_level())+"%"), 'battery_state':(str(battery.get_status()))})
+        return json.dumps({'alive':True,'pellet_level':(str(current_level)+'%'),'battery_level':(str(battery.get_level())+"%"), 'battery_state':(str(battery.get_status()))})
     except:
         return json.dumps({'alive':False})
 
@@ -61,7 +61,7 @@ async def api_calibrate(request,level):
     if request.method == 'GET':
         return str(config['hopper'][(str(level)+'_measurement')])
     elif request.method == 'POST':
-        config['hopper'][(str(level)+'_measurement')] = take_measurement(False)
+        config['hopper'][(str(level)+'_measurement')] = sensor.calibrate()
         with open('config.json', 'w') as f:
             json.dump(config,f)
         
@@ -70,7 +70,7 @@ async def api_calibrate(request,level):
 # Return current level
 @api.route('/level')
 async def api_measure(request):
-    return str(calc_remaining()),200
+    return str(manual_refresh()),200
 
 # System reboot
 @api.route('/system/<action>', methods=['POST'])
@@ -163,89 +163,41 @@ def mqtt_publish(l,t,b,s):
 
 
 
-# ========== SENSOR ========== #
-# Configure Ultrasonic Sensor
-scan_trigger = Pin(23, Pin.OUT)
-scan_echo = Pin(22, Pin.IN)
-
-
-# Take a measurement and return in cm
-def take_measurement(prod):
-    
-    # Store multiple measurements
-    measurements = []
-    
-    # Take 4 measurements
-    for m in range(4):    
-        # Trigger
-        scan_trigger.value(0)
-        utime.sleep_us(2)
-        scan_trigger.value(1)
-        utime.sleep_us(5)
-        scan_trigger.value(0)
-
-        # Wait for reading from receiver
-        while scan_echo.value() == 0:
-            signal_off = utime.ticks_us()
-        while scan_echo.value() == 1:
-            signal_on = utime.ticks_us()
-
-        # Calculate distance in cm
-        timepassed = (signal_on - signal_off)
-        measurement = ((timepassed * 0.0343) / 2)
-        
-        # Ignore junk
-        if prod:
-            if (measurement > config['hopper']['empty_measurement']) or (measurement < config['hopper']['full_measurement']):
-                pass
-            else:
-                measurements.append(measurement)
-        else:
-            measurements.append(measurement)
-            
-        # Pause between measurements
-        time.sleep(1)
-    
-    # Return the average measurements
-    try:
-        return (sum(measurements)/len(measurements))
-    except ZeroDivisionError:
-        return config['hopper']['empty_measurement']
-
-# Calculate remaining pellets
-def calc_remaining():
-    # Take a measurement and calculate remaining
-    level = take_measurement(True)
-    try:
-        p_level = ((level-config['hopper']['empty_measurement'])*100)/(config['hopper']['full_measurement']-config['hopper']['empty_measurement'])
-    except ZeroDivisionError:
-        p_level = 0
-
-    # Clean the result
-    if p_level < 0:
-        p_level = 0
-    if p_level > 100:
-        p_level = 100
-    
-
-    return(round(p_level))
-
-    
-    # Primary function to poll sensor and report data via MQTT
+# ========== SENSOR ========== #    
+# Primary function to poll sensor and report data via MQTT
 def sensor_routine():
     # Main loop to continuously poll/report
     while True:
-        if not calibration_mode:
-            # Get the current hopper level (in cm), save globally for access via webserver
-            global current_level
-            current_level = calc_remaining()
-    
-            # If MQTT is enabled, publish the data
-            if config['mqtt']['status'] == 1:
-                mqtt_publish(str(current_level),config['hopper']['current_pellets'], str(battery.get_level()), str(battery.get_status()))
+        # Get the current hopper level (in cm), save globally for access via webserver
+        global current_level
+        m = sensor.calc_remaining(config['hopper']['empty_measurement'],config['hopper']['full_measurement'])
+        if m >= 0:
+            current_level = m
+            
+        # If MQTT is enabled, publish the data
+        if config['mqtt']['status'] == 1:
+            mqtt_publish(str(current_level),config['hopper']['current_pellets'], str(battery.get_level()), str(battery.get_status()))
 
-            # Sleep for user-defined amount of time before polling again
-            await asyncio.sleep(config['hopper']['poll_frequency'])
+        # Sleep for user-defined amount of time before polling again
+        await asyncio.sleep(config['hopper']['poll_frequency'])
+
+# Run when a new measurement is requested
+def manual_refresh():
+    global current_level
+    m = sensor.calc_remaining(config['hopper']['empty_measurement'],config['hopper']['full_measurement'])
+    if m >= 0:
+        current_level = m
+        
+    # If MQTT is enabled, publish the data
+    if config['mqtt']['status'] == 1:
+        mqtt_publish(str(current_level),config['hopper']['current_pellets'], str(battery.get_level()), str(battery.get_status()))
+        
+    return current_level
+    
+# Push battery updates      
+def push_batt_status(pin):
+    if config['mqtt']['status'] == 1:
+        mqtt_publish(str(current_level),config['hopper']['current_pellets'], str(battery.get_level()), str(battery.get_status()))
 # ============================ #
 
 
@@ -278,20 +230,25 @@ if __name__ == '__main__':
         
         with open('config.json', 'w') as f:
             json.dump(config,f)
-            
-        
+    
+    # Setup listeners for battery
+    batt_pg = Pin(25, Pin.IN, Pin.PULL_UP)
+    batt_s1 = Pin(26, Pin.IN, Pin.PULL_UP)
+    batt_s2 = Pin(27, Pin.IN, Pin.PULL_UP)
+    batt_pg.irq(trigger = Pin.IRQ_RISING | Pin.IRQ_FALLING, handler = push_batt_status)
+    batt_s1.irq(trigger = Pin.IRQ_RISING | Pin.IRQ_FALLING, handler = push_batt_status)
+    batt_s2.irq(trigger = Pin.IRQ_RISING | Pin.IRQ_FALLING, handler = push_batt_status)
 
     # Working variables
     current_level = 0
-    calibration_mode = False
     
     # Configure the network
     status = connect_network()
 
-
     # Start
     asyncio.run(main())
 # ========================== #
+
 
 
 

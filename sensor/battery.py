@@ -1,5 +1,6 @@
+# ========== IMPORTS ========== #
 from machine import Pin, ADC
-
+# ============================= #
 
 # Configure Battery Voltage
 battery = ADC(Pin(34, Pin.IN))
@@ -51,10 +52,14 @@ def get_level():
     # Get current voltage and estimate life remaining
     voltage = (battery.read() * (3.6/4096))*2
     voltage = voltage - (voltage*.05)
+
     battery_life = ((voltage - min_battery_voltage) / (max_battery_voltage - min_battery_voltage)) * 100;
     if battery_life > 100:
         return 100
     elif battery_life < 0:
         return 0
     else:
-        return battery_life
+        return round(battery_life)
+    
+
+    
